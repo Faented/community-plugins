@@ -194,7 +194,7 @@ local function redactKeyValues(text, keyPattern)
   local search = 1
   local spans = 0
   local capped = false
-  local pattern = keyPattern .. "%s*[:=]%s*"
+  local pattern = keyPattern .. "%s*[\"']?%s*[:=]%s*"
 
   while true do
     if spans >= REDACT_MAX_SPANS then
@@ -284,6 +284,14 @@ function M.redact(value, maxChars)
     return ""
   end
   local limit = maxChars or 200
+  -- URL credentials and query values must be removed regardless of whether the
+  -- text matches a secret keyword, otherwise a plain URL bypasses the fast path.
+  if text:find("://", 1, true) then
+    text = text:gsub(URL_PATTERN, function(url)
+      return (url:gsub("[?#].*$", ""))
+    end)
+    text = text:gsub(URL_USERINFO_PATTERN, "%1" .. REDACT_MARKER .. "@")
+  end
   local cacheKey = tostring(limit) .. "|" .. text
   local cached = redactCache[cacheKey]
   if cached ~= nil then
@@ -332,14 +340,6 @@ function M.redact(value, maxChars)
     "%1%2" .. REDACT_MARKER
   )
   text = text:gsub(BEARER_PATTERN, "Bearer " .. REDACT_MARKER)
-
-  -- Displayed URLs keep scheme/host/path but never query or fragment values.
-  -- Strip URLs before key/value redaction so a redaction marker containing "]"
-  -- cannot truncate the URL match and leave a stray bracket behind.
-  text = text:gsub(URL_PATTERN, function(url)
-    return (url:gsub("[?#].*$", ""))
-  end)
-  text = text:gsub(URL_USERINFO_PATTERN, "%1" .. REDACT_MARKER .. "@")
 
   for _, keyPattern in ipairs(SECRET_KEY_PATTERNS) do
     text = redactKeyValues(text, keyPattern)
@@ -917,11 +917,17 @@ function M.extractActivity(message)
   local function fromTool(tool)
     local state = type(tool.state) == "table" and tool.state or {}
     local name = "tool"
-    if type(tool.name) == "string" and tool.name:match("^[A-Za-z0-9_-]{1,32}$") then
+    if type(tool.name) == "string"
+      and #tool.name <= 32
+      and tool.name:match("^[A-Za-z0-9_-]+$")
+    then
       name = tool.name
     end
     local status = state.status
-    if type(status) ~= "string" or status:match("^[A-Za-z0-9_-]{1,32}$") == nil then
+    if type(status) ~= "string"
+      or #status > 32
+      or status:match("^[A-Za-z0-9_-]+$") == nil
+    then
       status = nil
     end
     return {
